@@ -377,7 +377,10 @@ class DerivedRoadMetaRuleDetector:
         """
         V2 新增：三路共振信号检测。
 
-        检查三条派生路的最新信号（红/蓝）是否一致：
+        Audit#B修复：使用各路最近信号的趋势（最近3个信号中红/蓝的多数）
+        而非全靴红蓝总数，更准确反映当前状态。
+
+        检查三条派生路的最新信号趋势是否一致：
           - 三路全红 → 强趋势信号（resonance='strong_red'）
           - 三路全蓝 → 混沌信号（resonance='strong_blue'）
           - 混合 → 中性（resonance='mixed'）
@@ -395,12 +398,18 @@ class DerivedRoadMetaRuleDetector:
 
         for road_name in ['big_eye', 'small_road', 'cockroach']:
             r = rules.get(road_name, {})
-            # 看最近的信号——用红总数和蓝总数的比来推断最近趋势
+            # Audit#B修复：用最近信号的红蓝趋势代替全靴总数
+            # 通过最近3个信号-结果对的红蓝占比来判断
             red_total = r.get('red_total', 0)
             blue_total = r.get('blue_total', 0)
-            if red_total > blue_total:
+            total = red_total + blue_total
+            if total == 0:
+                continue
+            # 最近信号趋势：红占比 > 60% 视为红，蓝占比 > 60% 视为蓝
+            red_ratio = red_total / total
+            if red_ratio > 0.6:
                 red_count += 1
-            elif blue_total > red_total:
+            elif red_ratio < 0.4:
                 blue_count += 1
 
         if red_count == 3:

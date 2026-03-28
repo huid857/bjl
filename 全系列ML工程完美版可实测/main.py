@@ -445,11 +445,10 @@ class BaccaratPredictor:
             self._last_shoes_count = len(shoes)
             self._last_history_count = len(history)
         else:
+            # Audit#B修复：使用 update_data 深层同步所有子模型数据
             ensemble = self.last_ensemble
-            ensemble.current_shoe_data = current
-            ensemble.combined_data = history + current
-            ensemble.analyzer.current_shoe_data = current
-        
+            ensemble.update_data(history, current)
+
         # 获取预测
         print("\n  正在分析...")
         prediction = ensemble.predict_next()
@@ -507,11 +506,10 @@ class BaccaratPredictor:
             self._last_shoes_count = len(shoes)
             self._last_history_count = len(history)
         else:
+            # Audit#B修复：使用 update_data 深层同步所有子模型数据
             ensemble = self.last_ensemble
-            ensemble.current_shoe_data = current
-            ensemble.combined_data = history + current
-            ensemble.analyzer.current_shoe_data = current
-        
+            ensemble.update_data(history, current)
+
         print("\n  正在生成详细分析...")
         
         # 显示完整分析

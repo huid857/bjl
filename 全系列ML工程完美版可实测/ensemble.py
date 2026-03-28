@@ -155,9 +155,11 @@ class EnsemblePredictor:
         shoe_weight_adj = {}
         if self.shoe_analyzer and len(self.current_shoe_data) >= 10:
             shoe_analysis = self._get_shoe_analysis()
-            # Bug#13修复：传入 regime_result，使用强度比例权重而非固定值
+            # Bug#13修复 + Audit#B修复：不再传入 regime_result，避免 regime 权重
+            # 在 shoe_weight_adj 和 regime_weight_adj 中被重复应用。
+            # Regime 权重统一由 _apply_regime_weight 负责。
             shoe_adjustment = self.shoe_analyzer.get_shoe_weight_adjustment(
-                self.current_shoe_data, regime_result=regime_result
+                self.current_shoe_data, regime_result=None
             )
             shoe_weight_adj = shoe_adjustment.get('model_adjustments', {})
 
@@ -297,8 +299,23 @@ class EnsemblePredictor:
                 
                 self.last_model_predictions[model_name] = self._get_prediction_choice(similar_pred)
 
+        # 10. Audit#B新增：双跳（双对 BBPP）模式预测
+        # 原 predict_by_double_alternation 方法已存在但未集成到 predict_next
+        if self._model_enabled('DoubleAlt'):
+            double_pred = self.analyzer.predict_by_double_alternation(regime_result)
+            if double_pred['confidence'] > 30:
+                model_name = 'DoubleAlt'
+                base_weight = 0.5
+                adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, shoe_weight_adj)
+                adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
+                predictions.append({
+                    'name': model_name, 'weight': adjusted_weight,
+                    'base_weight': base_weight, 'prediction': double_pred
+                })
+                self.last_model_predictions[model_name] = self._get_prediction_choice(double_pred)
+
         # 11. 派生路元规律预测（DerivedRoadMetaRule）
-        # 靠靠内实时学习“逢红就续/逢蓝就跳”等元规律
+        # 靠靠内实时学习”逢红就续/逢蓝就跳”等元规律
         if self._model_enabled('DerivedRoad'):
             derived_result = self.derived_road.analyze(self.current_shoe_data)
             if derived_result.get('can_predict', False):
@@ -713,7 +730,7 @@ class EnsemblePredictor:
             'warning': '请理性投注，控制风险' if strength == 'weak' else None
         }
     
-    def recommend_skip(self):
+    def recommend_skip(self, regime_result=None):
         """
         判断当前是否建议跳过预测（不下注）
 
@@ -722,6 +739,9 @@ class EnsemblePredictor:
         - Regime 检测到规律切换（switch_event == True）
         - Regime 置信度因子 <= 0.65（亂路状态）
 
+        Audit#B修复：接受外部传入的 regime_result，避免重复调用 analyze()
+        导致 regime_history 被污染。
+
         Returns:
             (should_skip: bool, reason: str)
         """
@@ -729,17 +749,18 @@ class EnsemblePredictor:
         if consecutive_errors >= 4:
             return True, f"连续预测错误{consecutive_errors}次，建议暂时观望"
 
-        # Regime 驱动的跳过判断
-        if len(self.current_shoe_data) >= 8:  # 至少有足够数据分析
+        # Regime 驱动的跳过判断（优先使用传入的结果，避免重复 analyze）
+        if regime_result is None and len(self.current_shoe_data) >= 8:
             regime_result = self.regime_detector.analyze(self.current_shoe_data)
-            if regime_result.get('can_analyze', False):
-                # V2：模式断裂检测
-                if regime_result.get('break_detected', False):
-                    return True, f"⚡ 模式断裂！{regime_result['recommendation']}，建议暂停等待新模式形成"
-                if regime_result.get('switch_event', False):
-                    return True, f"⚠️ 靴牌走势切换中：{regime_result['recommendation']}，建议观察稳定后再入场"
-                if regime_result.get('confidence_factor', 1.0) <= 0.65:
-                    return True, f"⚠️ 当前乱路状态（主导强度仅{regime_result['regime_strength']:.0f}%），建议观望"
+
+        if regime_result and regime_result.get('can_analyze', False):
+            # V2：模式断裂检测
+            if regime_result.get('break_detected', False):
+                return True, f"⚡ 模式断裂！{regime_result['recommendation']}，建议暂停等待新模式形成"
+            if regime_result.get('switch_event', False):
+                return True, f"⚠️ 靴牌走势切换中：{regime_result['recommendation']}，建议观察稳定后再入场"
+            if regime_result.get('confidence_factor', 1.0) <= 0.65:
+                return True, f"⚠️ 当前乱路状态（主导强度仅{regime_result['regime_strength']:.0f}%），建议观望"
 
         return False, None
     
