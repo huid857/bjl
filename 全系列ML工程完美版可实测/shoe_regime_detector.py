@@ -1,5 +1,12 @@
 """
-靴牌性格实时评估器 (Shoe Regime Detector)
+靴牌性格实时评估器 (Shoe Regime Detector) - V2 增强版
+
+V2 优化内容：
+  1. 渐进式模式轨迹追踪：每局记录累计分析快照，可回溯模式演变历程
+  2. 自适应阈值：用「相对差距」取代固定 55%/40% 门槛
+  3. 模式断裂检测：当稳定模式突然被打破时自动预警
+  4. 模式稳定性指数：连续 N 局主导模式不变 → 可信度高
+  5. 靴内全量滚动分析（从第1局到当前局累计，非固定窗口）
 
 设计思想：
   每新增一局，从第一局到当前整靴累计分析，识别主导模式（长龙/单跳/双跳/混沌）
@@ -9,31 +16,43 @@
   - 累计全靴分析（非固定窗口）
   - 近期指数加权（支持切换检测）
   - 输出连续强度分数（0~100%），而非是/否判断
-  - 置信度因子用于乘以所有预测模型的置信度
+  - 渐进式模式轨迹（regime_history）
+  - 模式稳定性指数和断裂检测
+  - 自适应阈值（基于模式间相对差距）
 """
 
 
 class ShoeRegimeDetector:
-    """靴牌性格实时评估器"""
+    """靴牌性格实时评估器 V2"""
 
     # 近期衰减因子：越近期的局，权重越高
     # 0.92 意味着距现在 10 局前的数据权重约为最近局的 (0.92^10 ≈ 0.43)
     RECENCY_DECAY = 0.92
 
-    # 主导模式的强度阈值
-    DOMINANT_THRESH = 0.55   # 超过55%算"主导"
-    WEAK_THRESH = 0.40       # 低于40%算"混沌/亂路"
+    # 自适应阈值参数（取代原固定 DOMINANT_THRESH=0.55 和 WEAK_THRESH=0.40）
+    # 「主导」：最高模式分数与第二高的差距 ≥ GAP_DOMINANT_MIN 即可视为主导
+    GAP_DOMINANT_MIN = 0.10   # 最低差距 10% 就可认定主导
+    # 当最高模式分数本身 < FLOOR_STRENGTH 时，无论差距多大都视为混沌
+    FLOOR_STRENGTH = 0.25
+    # 当差距 < GAP_CHAOS 时，视为混沌
+    GAP_CHAOS = 0.05
 
     # — 置信度因子 —
     CF_STRONG   = 1.05   # 主导强度 ≥ 70%，稳定
-    CF_NORMAL   = 1.00   # 主导强度 55~70%，稳定或增强
-    CF_UNCLEAR  = 0.85   # 强度 40~55%，不明确
+    CF_NORMAL   = 1.00   # 正常主导
+    CF_UNCLEAR  = 0.85   # 不明确
     CF_SWITCH   = 0.70   # 正在切换中
-    CF_CHAOS    = 0.65   # 主导强度 < 40%（亂路）
+    CF_CHAOS    = 0.65   # 混沌
+    CF_BREAK    = 0.60   # 模式断裂
 
     def __init__(self):
         """初始化"""
-        pass
+        # V2 新增：模式轨迹历史，每次 analyze 自动追加
+        self.regime_history = []
+        # V2 新增：断裂检测状态
+        self._last_stable_regime = None
+        self._stable_count = 0
+        self._peak_stable_strength = 0  # 稳定期间的峰值强度
 
     # ──────────────────────────────────────────────
     # 公共接口
@@ -47,24 +66,17 @@ class ShoeRegimeDetector:
             shoe_data: 当前靴牌数据列表（含和局），如 ['B','P','T','B',...]
 
         Returns:
-            {
-                'dominant_regime': str,     # 主导模式名
-                'regime_strength': float,   # 0~100，主导模式加权强度占比
-                'regime_scores': dict,      # 四种模式各自分数
-                'regime_trend': str,        # 'stable'|'strengthening'|'weakening'|'switching'
-                'switch_event': bool,       # 最近5局内是否发生主导模式切换
-                'confidence_factor': float, # 乘以预测置信度的系数（0.5~1.1）
-                'recommendation': str,      # 给用户看的中文描述
-                'can_analyze': bool,        # 数据是否足够
-            }
+            字典（详见下方）
         """
         # 去除和局
         seq = [x for x in shoe_data if x != 'T']
         n = len(seq)
 
         # 数据不足：返回中性结果
-        if n < 8:
-            return self._neutral_result(n)
+        if n < 6:
+            result = self._neutral_result(n)
+            self._update_history(n, result)
+            return result
 
         # Step 1: 给序列中每个位置标注模式类型
         labels = self._label_sequence(seq)
@@ -72,19 +84,28 @@ class ShoeRegimeDetector:
         # Step 2: 用指数衰减权重计算各模式的加权占比
         scores = self._compute_weighted_scores(labels)
 
-        # Step 3: 确定主导模式和强度
-        dominant, strength = self._get_dominant(scores)
+        # Step 3: 自适应阈值确定主导模式和强度
+        dominant, strength, gap = self._get_dominant_adaptive(scores)
 
         # Step 4: 检测规律趋势（与前半段比较）
         trend, switch_event = self._detect_regime_trend(seq, dominant)
 
-        # Step 5: 计算置信度因子
-        cf = self._compute_confidence_factor(strength, trend)
+        # Step 5: 模式断裂检测（V2 新增）
+        break_detected = self._detect_pattern_break(dominant, strength)
 
-        # Step 6: 生成描述
-        recommendation = self._build_recommendation(dominant, strength, trend, switch_event)
+        # Step 6: 计算模式稳定性指数（V2 新增）
+        stability_index = self._compute_stability_index()
 
-        return {
+        # Step 7: 计算置信度因子
+        cf = self._compute_confidence_factor(strength, trend, break_detected, stability_index)
+
+        # Step 8: 生成描述
+        recommendation = self._build_recommendation(
+            dominant, strength, trend, switch_event,
+            break_detected, stability_index
+        )
+
+        result = {
             'dominant_regime': dominant,
             'regime_strength': round(strength * 100, 1),
             'regime_scores': {k: round(v * 100, 1) for k, v in scores.items()},
@@ -94,90 +115,219 @@ class ShoeRegimeDetector:
             'recommendation': recommendation,
             'can_analyze': True,
             'seq_length': n,
+            # V2 新增字段
+            'gap_to_second': round(gap * 100, 1),    # 与第二名的差距
+            'break_detected': break_detected,          # 模式断裂
+            'stability_index': stability_index,         # 稳定性指数 (0~1)
+            'regime_history_len': len(self.regime_history),
         }
+
+        # 更新历史轨迹
+        self._update_history(n, result)
+
+        return result
 
     def get_model_weight_adjustments(self, regime_result: dict) -> dict:
         """
         根据 Regime 结果返回各模型的权重调整系数。
-
-        Args:
-            regime_result: analyze() 的返回值。
-
-        Returns:
-            {model_name: multiplier}
+        V2：增加了断裂检测和稳定性指数的影响。
         """
         if not regime_result.get('can_analyze', False):
             return {}
 
         dominant = regime_result['dominant_regime']
-        strength = regime_result['regime_strength'] / 100.0   # 转回 0~1
+        strength = regime_result['regime_strength'] / 100.0
         trend = regime_result['regime_trend']
         switch = regime_result['switch_event']
+        break_detected = regime_result.get('break_detected', False)
+        stability = regime_result.get('stability_index', 0.5)
 
-        # 基础调整表（主导模式 → 各模型乘数）
-        # 线性插值：strength 在 [0.55, 0.85] 之间时，系数从 1.0 渐变到最大/最小值
         def lerp(base_min, base_max, s):
-            """在 strength 0.55~0.85 之间线性插值"""
-            t = min(1.0, max(0.0, (s - 0.55) / 0.30))
+            """在 strength 0.30~0.85 之间线性插值（自适应阈值下起点更低）"""
+            t = min(1.0, max(0.0, (s - 0.30) / 0.55))
             return base_min + t * (base_max - base_min)
 
         adj = {}
 
         if dominant == 'long_streak':
-            s = strength if strength >= 0.55 else 0.55
+            s = max(strength, 0.30)
             adj = {
-                'Streak':      lerp(1.0, 1.6, s),
-                'Historical':  lerp(1.0, 1.1, s),
-                'SimilarShoe': lerp(1.0, 1.2, s),
+                'Streak':         lerp(1.0, 1.6, s),
+                'Historical':     lerp(1.0, 1.1, s),
+                'SimilarShoe':    lerp(1.0, 1.2, s),
                 'IntraShoeNgram': lerp(1.0, 1.4, s),
-                'Trend':       lerp(0.8, 0.6, s),
-                'Frequency':   lerp(0.9, 0.8, s),
+                'Trend':          lerp(0.8, 0.6, s),
+                'Frequency':      lerp(0.9, 0.8, s),
             }
 
         elif dominant == 'single_alt':
-            s = strength if strength >= 0.55 else 0.55
+            s = max(strength, 0.30)
             adj = {
-                'Streak':      lerp(0.7, 0.3, s),   # 单跳时连龙模型应大幅降低
-                'Historical':  lerp(0.9, 0.8, s),
-                'SimilarShoe': lerp(1.0, 1.0, s),
+                'Streak':         lerp(0.7, 0.3, s),
+                'Historical':     lerp(0.9, 0.8, s),
+                'SimilarShoe':    lerp(1.0, 1.0, s),
                 'IntraShoeNgram': lerp(1.2, 1.6, s),
-                'Trend':       lerp(1.0, 0.9, s),
-                'Frequency':   lerp(1.0, 1.1, s),
+                'Trend':          lerp(1.0, 0.9, s),
+                'Frequency':      lerp(1.0, 1.1, s),
             }
 
         elif dominant == 'double_alt':
-            s = strength if strength >= 0.55 else 0.55
+            s = max(strength, 0.30)
             adj = {
-                'Streak':      lerp(0.8, 0.5, s),
-                'Historical':  lerp(0.9, 0.8, s),
-                'SimilarShoe': lerp(1.0, 0.9, s),
+                'Streak':         lerp(0.8, 0.5, s),
+                'Historical':     lerp(0.9, 0.8, s),
+                'SimilarShoe':    lerp(1.0, 0.9, s),
                 'IntraShoeNgram': lerp(1.2, 1.6, s),
-                'DoubleAlt':   lerp(1.2, 1.8, s),   # 双跳专用模型权重大幅提升
-                'Trend':       lerp(0.9, 0.8, s),
-                'Frequency':   lerp(1.0, 1.1, s),
+                'DoubleAlt':      lerp(1.2, 1.8, s),
+                'Trend':          lerp(0.9, 0.8, s),
+                'Frequency':      lerp(1.0, 1.1, s),
             }
 
         else:
             # chaos / switching：所有模型均降权
             chaos_factor = 0.7 if not switch else 0.6
             adj = {
-                'Streak':      chaos_factor,
-                'Historical':  chaos_factor,
-                'SimilarShoe': chaos_factor,
-                'IntraShoeNgram': chaos_factor,
-                'Trend':       chaos_factor,
-                'Frequency':   chaos_factor,
-                'LSTM':        chaos_factor,
-                'RandomForest': chaos_factor,
-                'LSTM_V2':     chaos_factor,
-                'RF_V2':       chaos_factor,
+                'Streak': chaos_factor, 'Historical': chaos_factor,
+                'SimilarShoe': chaos_factor, 'IntraShoeNgram': chaos_factor,
+                'Trend': chaos_factor, 'Frequency': chaos_factor,
+                'LSTM': chaos_factor, 'RandomForest': chaos_factor,
+                'LSTM_V2': chaos_factor, 'RF_V2': chaos_factor,
             }
 
-        # 切换中：额外惩罚
+        # V2：切换中额外惩罚
         if switch and dominant != 'chaos':
             adj = {k: v * 0.85 for k, v in adj.items()}
 
+        # V2：模式断裂额外惩罚（所有模型降 30%）
+        if break_detected:
+            adj = {k: v * 0.70 for k, v in adj.items()}
+
+        # V2：稳定性加成（稳定模式加权，不稳定模式降权）
+        if stability > 0.7 and dominant != 'chaos':
+            stability_bonus = 1.0 + (stability - 0.7) * 0.3  # 最高 1.09
+            adj = {k: v * stability_bonus for k, v in adj.items()}
+        elif stability < 0.3:
+            stability_penalty = 0.8 + stability * 0.67  # 最低 0.8
+            adj = {k: v * stability_penalty for k, v in adj.items()}
+
         return adj
+
+    def get_regime_trajectory(self) -> list:
+        """
+        V2 新增：获取完整的模式演变轨迹。
+
+        Returns:
+            list of dict: 每局的模式快照
+        """
+        return list(self.regime_history)
+
+    def reset(self):
+        """重置状态（新靴牌开始时调用）"""
+        self.regime_history = []
+        self._last_stable_regime = None
+        self._stable_count = 0
+        self._peak_stable_strength = 0
+
+    # ──────────────────────────────────────────────
+    # V2 新增：模式轨迹追踪
+    # ──────────────────────────────────────────────
+
+    def _update_history(self, round_num: int, result: dict):
+        """记录当前局的模式快照到轨迹历史"""
+        snapshot = {
+            'round': round_num,
+            'dominant': result.get('dominant_regime', 'unknown'),
+            'strength': result.get('regime_strength', 0),
+            'trend': result.get('regime_trend', 'stable'),
+            'stability': result.get('stability_index', 0),
+        }
+        self.regime_history.append(snapshot)
+
+    # ──────────────────────────────────────────────
+    # V2 新增：模式断裂检测
+    # ──────────────────────────────────────────────
+
+    def _detect_pattern_break(self, current_dominant: str, current_strength: float) -> bool:
+        """
+        检测模式断裂：之前稳定的模式突然消失或强度骤降。
+
+        定义：
+          - 过去连续 ≥ 4 局的主导模式相同（稳定期），且当前局主导模式改变 → 断裂
+          - 主导模式不变但强度从峰值下降超过 25% → 断裂（模式衰减）
+
+        Returns:
+            bool: 是否检测到断裂
+        """
+        if not self.regime_history:
+            self._last_stable_regime = current_dominant
+            self._stable_count = 1
+            self._peak_stable_strength = current_strength * 100
+            return False
+
+        last = self.regime_history[-1]
+        last_dominant = last.get('dominant', 'unknown')
+
+        if current_dominant == last_dominant and current_dominant != 'chaos':
+            self._stable_count += 1
+            # 更新峰值强度
+            current_str_pct = current_strength * 100
+            if current_str_pct > self._peak_stable_strength:
+                self._peak_stable_strength = current_str_pct
+            if self._stable_count >= 4:
+                self._last_stable_regime = current_dominant
+
+            # 检查强度从峰值骤降（即使模式没变）
+            if (self._stable_count >= 4
+                    and self._peak_stable_strength - current_str_pct > 25):
+                return True
+        else:
+            # 模式变了
+            if (self._last_stable_regime is not None
+                    and self._stable_count >= 4
+                    and current_dominant != self._last_stable_regime):
+                # 断裂！之前稳定的模式被打破
+                self._stable_count = 1
+                self._peak_stable_strength = current_strength * 100
+                return True
+
+            self._stable_count = 1
+            self._peak_stable_strength = current_strength * 100
+
+        return False
+
+    # ──────────────────────────────────────────────
+    # V2 新增：模式稳定性指数
+    # ──────────────────────────────────────────────
+
+    def _compute_stability_index(self) -> float:
+        """
+        计算模式稳定性指数（0~1）。
+
+        定义：最近 N 局中，主导模式未变化的比例。
+        N = min(10, len(history))
+
+        Returns:
+            float: 0.0（极不稳定） ~ 1.0（完全稳定）
+        """
+        if len(self.regime_history) < 3:
+            return 0.5  # 数据不足，中性
+
+        window = min(10, len(self.regime_history))
+        recent = self.regime_history[-window:]
+
+        # 统计最频繁的主导模式
+        mode_counts = {}
+        for snap in recent:
+            d = snap.get('dominant', 'unknown')
+            mode_counts[d] = mode_counts.get(d, 0) + 1
+
+        if not mode_counts:
+            return 0.5
+
+        most_common_count = max(mode_counts.values())
+        stability = most_common_count / window
+
+        return round(stability, 3)
 
     # ──────────────────────────────────────────────
     # 内部方法
@@ -186,10 +336,6 @@ class ShoeRegimeDetector:
     def _label_sequence(self, seq: list) -> list:
         """
         逐位给序列元素打标签，返回与 seq 等长的标签列表。
-
-        Audit#B 修复：引入"run_len==2的匹配居中续"=double_alt区分条件。
-        真实长龙：连续段 ≥3 局。
-        双跳对内：连续段恰好 = 2（上一对也是2）。
 
         标签类型：
           'long_streak' — 处于真实长龙段（连续段长度 ≥3）
@@ -221,41 +367,29 @@ class ShoeRegimeDetector:
                     labels[i] = 'long_streak'
 
                 elif rl == 2:
-                    # Audit#B 修复：段长==2时，判断是真正对还是双跳对内
-                    # 寻找当前段的起始位x（run_len[x]==1）
-                    pair_start = i - 1  # 当前对的第1局
+                    # 段长==2时，判断是真正对还是双跳对内
+                    pair_start = i - 1
                     if pair_start >= 1:
-                        # 前一局是切换局（前一对的第2局）
-                        # 上一对的长度
-                        prev_pair_len = run_len[pair_start - 1]  # pair_start-1 是前一对的最后一局
+                        prev_pair_len = run_len[pair_start - 1]
                         if prev_pair_len == 2:
-                            # 上一对也恰好是2：典型 BBPP 结构 → double_alt
                             labels[i] = 'double_alt'
                         elif prev_pair_len == 1:
-                            # 上一局是单局（上一对也是旭始）: 可能是 BBBP后起的雌形 → chaos
                             labels[i] = 'chaos'
                         else:
-                            # 上一对长度 ≥3：上一对是长龙后接双跳 → 保守标 long_streak
                             labels[i] = 'long_streak'
                     else:
                         labels[i] = 'long_streak'
-
-                # else: rl==1 在下面的 diff_prev 分支处理
                 continue
 
             else:  # diff_prev
                 if i >= 3:
-                    # 双跳檢测：当前是新对的第1局，前一对完整（run_len==2）
                     if run_len[i - 1] == 2 and run_len[i] == 1:
                         labels[i] = 'double_alt'
                         continue
 
-                # 单跳：当前与上一局不同，上一局与上上局也不同（BPBP）
                 if seq[i - 2] != seq[i - 1]:
                     labels[i] = 'single_alt'
                     continue
-
-            # else → 默认 chaos
 
         return labels
 
@@ -273,37 +407,50 @@ class ShoeRegimeDetector:
         weight_sum = 0.0
 
         for i, label in enumerate(labels):
-            # 权重：越靠近末尾（近期）权重越大
             w = self.RECENCY_DECAY ** (n - 1 - i)
             totals[label] += w
             weight_sum += w
 
-        # 归一化
         if weight_sum > 0:
             return {k: v / weight_sum for k, v in totals.items()}
         return totals
 
-    def _get_dominant(self, scores: dict):
-        """确定主导模式和强度"""
-        dominant = max(scores, key=scores.get)
-        strength = scores[dominant]
+    def _get_dominant_adaptive(self, scores: dict):
+        """
+        V2：自适应阈值确定主导模式和强度。
 
-        # 如果最高分低于 WEAK_THRESH，强制标为 chaos
-        if strength < self.WEAK_THRESH:
-            dominant = 'chaos'
-            strength = scores.get('chaos', strength)
+        不再使用固定的 DOMINANT_THRESH=0.55 和 WEAK_THRESH=0.40，
+        而是基于最高分与次高分的「相对差距」来判断。
 
-        return dominant, strength
+        规则：
+          1. 最高分 < FLOOR_STRENGTH → 强制 chaos
+          2. 最高分与次高分差距 < GAP_CHAOS → chaos（势均力敌）
+          3. 差距 ≥ GAP_DOMINANT_MIN → 主导模式确认
+          4. 中间地带 → 使用最高分模式但标记为不确定
+
+        Returns:
+            (dominant: str, strength: float, gap: float)
+        """
+        sorted_items = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+        best_mode, best_score = sorted_items[0]
+        second_score = sorted_items[1][1] if len(sorted_items) > 1 else 0
+
+        gap = best_score - second_score
+
+        # 规则 1：绝对强度过低 → chaos
+        if best_score < self.FLOOR_STRENGTH:
+            return 'chaos', best_score, gap
+
+        # 规则 2：差距太小 → chaos
+        if gap < self.GAP_CHAOS:
+            return 'chaos', best_score, gap
+
+        # 规则 3 & 4：差距足够 → 主导；差距中等 → 也是主导但强度偏低
+        return best_mode, best_score, gap
 
     def _detect_regime_trend(self, seq: list, current_dominant: str):
         """
         比较"前段"与"近期窗口"的主导模式，判断趋势。
-
-        Audit#C 修复：近期窗口改为 max(8, n//5)，封顶 15 局，
-        避免固定 8 局窗口在长靴中触发误报 switch_event=True。
-
-        Returns:
-            (trend: str, switch_event: bool)
         """
         n = len(seq)
         switch_event = False
@@ -312,22 +459,19 @@ class ShoeRegimeDetector:
         if n < 10:
             return trend, switch_event
 
-        # Audit#C修复：动态窗口 = max(8, n//5)，最多 15 局
         recent_window = min(15, max(8, n // 5))
         recent_labels = self._label_sequence(seq[-recent_window:])
         recent_scores = self._compute_weighted_scores(recent_labels)
-        recent_dominant, recent_strength = self._get_dominant(recent_scores)
+        recent_dominant, recent_strength, _ = self._get_dominant_adaptive(recent_scores)
 
-        # 前段：去掉近期窗口后的剩余序列
         if n >= 15:
             early_labels = self._label_sequence(seq[:-recent_window])
             early_scores = self._compute_weighted_scores(early_labels)
-            early_dominant, early_strength = self._get_dominant(early_scores)
+            early_dominant, early_strength, _ = self._get_dominant_adaptive(early_scores)
         else:
             early_dominant = current_dominant
             early_strength = 0.5
 
-        # 切换检测
         if recent_dominant != early_dominant and recent_dominant != 'chaos':
             switch_event = True
             trend = 'switching'
@@ -345,38 +489,60 @@ class ShoeRegimeDetector:
 
         return trend, switch_event
 
-    def _compute_confidence_factor(self, strength: float, trend: str) -> float:
-        """根据强度和趋势计算置信度因子"""
+    def _compute_confidence_factor(self, strength: float, trend: str,
+                                    break_detected: bool,
+                                    stability_index: float) -> float:
+        """V2：根据强度、趋势、断裂和稳定性综合计算置信度因子"""
+        # 模式断裂优先
+        if break_detected:
+            return self.CF_BREAK
+
         if trend == 'switching':
             return self.CF_SWITCH
+
         if strength >= 0.70:
-            return self.CF_STRONG
-        if strength >= self.DOMINANT_THRESH:
+            base_cf = self.CF_STRONG
+        elif strength >= 0.45:
             if trend in ('stable', 'strengthening'):
-                return self.CF_NORMAL
+                base_cf = self.CF_NORMAL
             else:
-                return self.CF_UNCLEAR
-        if strength >= self.WEAK_THRESH:
-            return self.CF_UNCLEAR
-        return self.CF_CHAOS
+                base_cf = self.CF_UNCLEAR
+        elif strength >= 0.30:
+            base_cf = self.CF_UNCLEAR
+        else:
+            base_cf = self.CF_CHAOS
+
+        # V2：稳定性修正
+        if stability_index >= 0.8:
+            base_cf = min(1.10, base_cf * 1.05)
+        elif stability_index < 0.3:
+            base_cf = base_cf * 0.90
+
+        return round(base_cf, 3)
 
     def _build_recommendation(self, dominant: str, strength: float,
-                               trend: str, switch_event: bool) -> str:
+                               trend: str, switch_event: bool,
+                               break_detected: bool, stability_index: float) -> str:
         """生成给用户看的中文描述"""
         names = {
             'long_streak': '长龙',
             'single_alt': '单跳',
             'double_alt': '双跳（双对）',
-            'chaos': '混沌（亂路）',
+            'chaos': '混沌（乱路）',
         }
         name = names.get(dominant, dominant)
         s_pct = f"{strength * 100:.0f}%"
 
+        # V2：断裂预警
+        if break_detected:
+            return (f"⚡ 模式断裂！原{self._last_stable_regime or ''}模式被打破，"
+                    f"当前转向{name}，建议暂停观察")
+
         if switch_event:
             return f"⚠️ 走势切换中（原{name}→新规律形成中），置信度已降低，建议观察"
 
-        if dominant == 'chaos' or strength < self.WEAK_THRESH:
-            return f"⚠️ 当前走势混乱（亂路，强度仅 {s_pct}），建议以观察为主"
+        if dominant == 'chaos' or strength < self.FLOOR_STRENGTH:
+            return f"⚠️ 当前走势混乱（乱路，强度仅 {s_pct}），建议以观察为主"
 
         trend_desc = {
             'stable': '稳定',
@@ -385,7 +551,17 @@ class ShoeRegimeDetector:
             'switching': '切换中',
         }.get(trend, trend)
 
-        return f"当前主导模式：{name}（强度 {s_pct}，{trend_desc}）"
+        # V2：加入稳定性信息
+        if stability_index >= 0.8:
+            stability_text = '，模式高度稳定'
+        elif stability_index >= 0.5:
+            stability_text = '，模式相对稳定'
+        elif stability_index >= 0.3:
+            stability_text = '，模式不太稳定'
+        else:
+            stability_text = '，模式很不稳定'
+
+        return f"当前主导模式：{name}（强度 {s_pct}，{trend_desc}{stability_text}）"
 
     def _neutral_result(self, n: int) -> dict:
         """数据不足时返回默认中性结果"""
@@ -397,7 +573,11 @@ class ShoeRegimeDetector:
             'regime_trend': 'stable',
             'switch_event': False,
             'confidence_factor': 1.0,
-            'recommendation': f'ℹ️ 数据不足（当前{n}局，去和局后需≥8局才能分析）',
+            'recommendation': f'ℹ️ 数据不足（当前{n}局，去和局后需≥6局才能分析）',
             'can_analyze': False,
             'seq_length': n,
+            'gap_to_second': 0.0,
+            'break_detected': False,
+            'stability_index': 0.5,
+            'regime_history_len': len(self.regime_history),
         }

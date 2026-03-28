@@ -18,6 +18,7 @@ from advanced_shoe_analyzer import AdvancedShoeAnalyzer
 from anomaly_detector import AnomalyDetector
 from shoe_regime_detector import ShoeRegimeDetector
 from derived_road_detector import DerivedRoadMetaRuleDetector
+from three_bead_analyzer import ThreeBeadAnalyzer
 from utils import result_to_chinese
 from prediction_history import PredictionHistory
 from similar_shoe_predictor import SimilarShoePredictor
@@ -83,6 +84,9 @@ class EnsemblePredictor:
 
         # 初始化派生路元规律检测器
         self.derived_road = DerivedRoadMetaRuleDetector()
+
+        # V2 新增：初始化三珠路分析引擎
+        self.three_bead = ThreeBeadAnalyzer()
 
         # 预测历史记录
         self.history = prediction_history if prediction_history else PredictionHistory()
@@ -311,6 +315,24 @@ class EnsemblePredictor:
                     })
                     self.last_model_predictions[model_name] = self._get_prediction_choice(derived_pred)
 
+        # 12. V2 新增：三珠路分析引擎 (ThreeBead)
+        if self._model_enabled('ThreeBead'):
+            three_bead_result = self.three_bead.analyze(self.current_shoe_data)
+            if three_bead_result.get('can_predict', False):
+                tb_pred = three_bead_result['prediction']
+                if tb_pred.get('confidence', 0) > 0:
+                    model_name = 'ThreeBead'
+                    base_weight = 0.6
+                    adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, shoe_weight_adj)
+                    adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
+                    predictions.append({
+                        'name': model_name,
+                        'weight': adjusted_weight,
+                        'base_weight': base_weight,
+                        'prediction': tb_pred
+                    })
+                    self.last_model_predictions[model_name] = self._get_prediction_choice(tb_pred)
+
         # 集成所有预测
         final_prediction = self._ensemble_predictions(predictions)
         
@@ -339,6 +361,12 @@ class EnsemblePredictor:
 
         # 添加 Regime 分析信息（靴牌性格评估结果）
         final_prediction['regime_analysis'] = regime_result
+
+        # V2：添加模式断裂预警和稳定性信息
+        if regime_result.get('break_detected', False):
+            final_prediction['pattern_break_warning'] = True
+            final_prediction['pattern_break_msg'] = regime_result.get('recommendation', '')
+        final_prediction['stability_index'] = regime_result.get('stability_index', 0.5)
 
         # 应用 Regime 的置信度因子（会综合异常检测共同调整）
         regime_cf = regime_result.get('confidence_factor', 1.0)
@@ -705,10 +733,13 @@ class EnsemblePredictor:
         if len(self.current_shoe_data) >= 8:  # 至少有足够数据分析
             regime_result = self.regime_detector.analyze(self.current_shoe_data)
             if regime_result.get('can_analyze', False):
+                # V2：模式断裂检测
+                if regime_result.get('break_detected', False):
+                    return True, f"⚡ 模式断裂！{regime_result['recommendation']}，建议暂停等待新模式形成"
                 if regime_result.get('switch_event', False):
                     return True, f"⚠️ 靴牌走势切换中：{regime_result['recommendation']}，建议观察稳定后再入场"
                 if regime_result.get('confidence_factor', 1.0) <= 0.65:
-                    return True, f"⚠️ 当前亂路状态（主导强度仅{regime_result['regime_strength']:.0f}%），建议观望"
+                    return True, f"⚠️ 当前乱路状态（主导强度仅{regime_result['regime_strength']:.0f}%），建议观望"
 
         return False, None
     

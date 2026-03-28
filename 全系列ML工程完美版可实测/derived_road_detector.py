@@ -76,6 +76,9 @@ class DerivedRoadMetaRuleDetector:
         # Step 3: 综合三路，确定主导元规律
         dominant, consistency, narrative = self._determine_dominant_rule(rules)
 
+        # Step 3.5 V2：三路共振信号检测
+        resonance = self._compute_resonance(rules)
+
         # Step 4: 最小样本检查
         min_samples = min(r.get('total', 0) for r in rules.values())
         if min_samples < self.MIN_SAMPLES:
@@ -85,8 +88,17 @@ class DerivedRoadMetaRuleDetector:
         sample_factor = min(1.0, min_samples / 20)
         rule_confidence = consistency * sample_factor * 100
 
+        # V2：共振加成/衰减
+        rule_confidence *= resonance['confidence_boost']
+
         # Step 6: 基于主导规律和最新信号预测
         prediction = self._make_prediction(columns, dominant, rules, rule_confidence)
+
+        # V2：共振信息追加到 narrative
+        if resonance['resonance'] == 'strong_red':
+            narrative += ' | 三路共振全红（强趋势）'
+        elif resonance['resonance'] == 'strong_blue':
+            narrative += ' | 三路共振全蓝（乱路信号）'
 
         return {
             'can_predict': prediction.get('confidence', 0) > 0,
@@ -96,6 +108,7 @@ class DerivedRoadMetaRuleDetector:
             'road_rules': rules,
             'narrative': narrative,
             'sample_count': min_samples,
+            'resonance': resonance,  # V2 新增
         }
 
     def get_prediction_weight(self, analyze_result: dict, regime_result: dict = None) -> float:
@@ -299,6 +312,8 @@ class DerivedRoadMetaRuleDetector:
         """
         综合三条路的统计，确定主导元规律。
 
+        V2 优化：增加三路共振信号检测。
+
         元规律类型：
           'red_B'  = 红信号后大概率出B（逢红开庄）
           'red_P'  = 红信号后大概率出P（逢红开闲）
@@ -311,7 +326,6 @@ class DerivedRoadMetaRuleDetector:
         """
         road_names = ['big_eye', 'small_road', 'cockroach']
 
-        # 每条路对红/蓝信号各自的主导方
         votes_red_b = votes_red_p = 0
         votes_blue_b = votes_blue_p = 0
         total_conf_red = total_conf_blue = 0
@@ -332,7 +346,6 @@ class DerivedRoadMetaRuleDetector:
                 elif r['blue_dominant'] == 'P':
                     votes_blue_p += 1
 
-        # 找出三路一致性最高的规律
         results = [
             ('red_B', votes_red_b, total_conf_red / 3),
             ('red_P', votes_red_p, total_conf_red / 3),
@@ -343,13 +356,11 @@ class DerivedRoadMetaRuleDetector:
 
         best_rule, best_votes, best_conf = results[0]
 
-        # 一致性要求：至少 2/3 条路同意
         if best_votes < 2:
             return 'unstable', 0.3, '⚠️ 派生路信号尚无一致规律，建议继续观察'
 
         consistency = best_votes / 3
 
-        # 生成描述
         rule_desc = {
             'red_B': '逢红出庄（红信号强势跟庄）',
             'red_P': '逢红出闲（红信号强势跟闲）',
@@ -361,6 +372,58 @@ class DerivedRoadMetaRuleDetector:
         narrative = f'元规律：{rule_desc}（{roads_agree}一致，强度{best_conf:.0f}%）'
 
         return best_rule, consistency, narrative
+
+    def _compute_resonance(self, rules: dict) -> dict:
+        """
+        V2 新增：三路共振信号检测。
+
+        检查三条派生路的最新信号（红/蓝）是否一致：
+          - 三路全红 → 强趋势信号（resonance='strong_red'）
+          - 三路全蓝 → 混沌信号（resonance='strong_blue'）
+          - 混合 → 中性（resonance='mixed'）
+
+        Returns:
+            {
+                'resonance': str,           # 'strong_red'|'strong_blue'|'mixed'
+                'red_count': int,           # 红信号数（0~3）
+                'blue_count': int,          # 蓝信号数（0~3）
+                'confidence_boost': float,  # 共振加成（0.8~1.2）
+            }
+        """
+        red_count = 0
+        blue_count = 0
+
+        for road_name in ['big_eye', 'small_road', 'cockroach']:
+            r = rules.get(road_name, {})
+            # 看最近的信号——用红总数和蓝总数的比来推断最近趋势
+            red_total = r.get('red_total', 0)
+            blue_total = r.get('blue_total', 0)
+            if red_total > blue_total:
+                red_count += 1
+            elif blue_total > red_total:
+                blue_count += 1
+
+        if red_count == 3:
+            return {
+                'resonance': 'strong_red',
+                'red_count': red_count,
+                'blue_count': blue_count,
+                'confidence_boost': 1.15,
+            }
+        elif blue_count == 3:
+            return {
+                'resonance': 'strong_blue',
+                'red_count': red_count,
+                'blue_count': blue_count,
+                'confidence_boost': 0.80,
+            }
+        else:
+            return {
+                'resonance': 'mixed',
+                'red_count': red_count,
+                'blue_count': blue_count,
+                'confidence_boost': 1.0,
+            }
 
     def _make_prediction(self, columns: list, dominant_rule: str,
                          rules: dict, rule_confidence: float) -> dict:
