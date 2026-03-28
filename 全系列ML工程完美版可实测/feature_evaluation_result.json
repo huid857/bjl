@@ -1,0 +1,48 @@
+{
+  "selected_features": [
+    "current_streak_length",
+    "banker_change_rate",
+    "volatility",
+    "alternation_rate_last_20",
+    "trend_direction",
+    "tie_ratio",
+    "data_recency",
+    "rounds_since_last_tie",
+    "trend_strength",
+    "tie_cluster_score",
+    "max_streak_overall",
+    "banker_ratio_last_10"
+  ],
+  "feature_scores": {
+    "banker_ratio_all": 0.4370868839042077,
+    "banker_ratio_last_5": 0.161890011528199,
+    "banker_ratio_last_10": 0.2426476099681195,
+    "banker_ratio_last_20": 0.4397722791090717,
+    "tie_ratio": 0.45758381937355996,
+    "tie_ratio_last_20": 0.21736806303521428,
+    "current_streak_length": 0.758445444725488,
+    "current_streak_type": 0.06491950025514748,
+    "max_streak_banker": 0.20410965090555228,
+    "max_streak_player": 0.08125401089374167,
+    "max_streak_overall": 0.3021049672994506,
+    "alternation_rate": 0.41253367934626894,
+    "alternation_rate_last_20": 0.6029902108097714,
+    "last_switch_rounds": 0.13571622792490537,
+    "trend_direction": 0.48671013036680716,
+    "trend_strength": 0.33956554447200626,
+    "banker_momentum": 0.21377337345952604,
+    "rounds_since_last_tie": 0.4028431429489441,
+    "tie_frequency_last_10": 0.04955229073755451,
+    "tie_cluster_score": 0.31612660476923876,
+    "total_rounds": 0.23697038047796046,
+    "data_recency": 0.43213999616534643,
+    "shoe_progress": 0.21347147136390102,
+    "banker_change_rate": 0.708031836811853,
+    "volatility": 0.6571528323215905
+  },
+  "dataset_info": {
+    "samples": 276,
+    "shoes": 22,
+    "features": 25
+  }
+}

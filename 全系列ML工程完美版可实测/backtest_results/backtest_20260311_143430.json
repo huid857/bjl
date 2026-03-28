@@ -1,0 +1,28 @@
+{
+  "timestamp": "2026-03-11 14:34:30",
+  "elapsed_seconds": 334.7,
+  "total_shoes_evaluated": 290,
+  "total_predictions": 11784,
+  "total_correct": 5393,
+  "total_wrong": 5285,
+  "total_neutral": 1106,
+  "valid_predictions": 10678,
+  "overall_accuracy": 0.505057126802772,
+  "model_accuracies": {
+    "Streak": 0.5079895949461167,
+    "Historical": 0.5058063307735531,
+    "Frequency": 0.49672223262783294,
+    "Trend": 0.48868778280542985
+  },
+  "shoes_above_50pct": 135,
+  "shoes_below_50pct": 129,
+  "max_loss_streak": 28,
+  "avg_loss_streak": 18.2,
+  "baselines": {
+    "always_banker": 0.5140689451974072,
+    "always_player": 0.4859310548025928,
+    "total_non_tie": 13576
+  },
+  "config": "Frequency, Historical, Streak, Trend",
+  "shoe_accuracy_avg": 0.5047419526828373
+}
