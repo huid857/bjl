@@ -279,6 +279,9 @@ class ShoeRegimeDetector:
             # 检查强度从峰值骤降（即使模式没变）
             if (self._stable_count >= 4
                     and self._peak_stable_strength - current_str_pct > 25):
+                # Audit#C修复：断裂后重置峰值和计数，避免后续每局都报断裂
+                self._peak_stable_strength = current_str_pct
+                self._stable_count = 1
                 return True
         else:
             # 模式变了
@@ -382,10 +385,20 @@ class ShoeRegimeDetector:
                 continue
 
             else:  # diff_prev
+                # Audit#C修复：双跳判断需要更严格的条件
+                # 不仅前段长度==2，还要再往前也是长度2的不同值段（BBPP结构）
                 if i >= 3:
                     if run_len[i - 1] == 2 and run_len[i] == 1:
-                        labels[i] = 'double_alt'
-                        continue
+                        # 找到前段(长度2)的起始位置，再看更前一段
+                        prev_seg_start = i - 2  # 前段起始（长度2的段头）
+                        if prev_seg_start >= 2:
+                            # 更前一段的末尾在 prev_seg_start - 1
+                            before_prev_len = run_len[prev_seg_start - 1]
+                            if before_prev_len == 2:
+                                # 确认是 XX YY Z 结构（真正双跳）
+                                labels[i] = 'double_alt'
+                                continue
+                        # 否则不是双跳：可能是长龙末尾的PP→B
 
                 if seq[i - 2] != seq[i - 1]:
                     labels[i] = 'single_alt'

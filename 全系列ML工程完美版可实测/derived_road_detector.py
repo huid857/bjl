@@ -175,19 +175,17 @@ class DerivedRoadMetaRuleDetector:
         """
         计算派生路的红/蓝信号序列及其后续结果（续/跳）。
 
-        派生路规则（列高度对比法）：
-          对于第 i 列（i >= offset + 1），看：
-            当前列第 j 行 vs 参照列（第 i - offset - 1 列）第 j 行
-            - 参照位置存在：红信号（规律性相同）
-            - 参照位置不存在（列更短）：蓝信号（规律性不同）
+        Audit#C重写：
+          原实现用 columns[i][0]（该列方向B/P）作为结果，但大路中
+          每列方向必然交替（B列→P列→B列），导致红信号后出B/P的比例
+          永远约50/50，统计完全无意义。
 
-        为实用起见，我们简化为：
-          对于每个新列 i（i >= offset + 1）的第1个元素：
-            如果 len(columns[i]) == len(columns[i - offset - 1])：→ 中性（跳过）
-            如果 len(columns[i]) >= len(columns[i - offset - 1])：→ 红（续规律）
-            如果 len(columns[i]) <  len(columns[i - offset - 1])：→ 蓝（破规律）
-          该信号对应的"结果"是：
-            columns[i][0] 与 columns[i-1][-1] 相同（续跟）还是不同（跳换）
+          修正：结果改为"续/跳"——该信号对应的列是否延续了长度≥2。
+            续(C) = 列长度 > 1（模式有持续性，该列至少连了2局）
+            跳(J) = 列长度 == 1（立刻就断了，换方向）
+
+          这样红→续/红→跳 的统计才有实际预测意义：
+            "在这靴牌中，看到红信号后，当前趋势是否倾向延续？"
 
         Args:
             columns: 大路列结构
@@ -196,12 +194,11 @@ class DerivedRoadMetaRuleDetector:
         Returns:
             (signals: list, outcomes: list)
             signals[k] = 'R'（红）or 'B'（蓝）
-            outcomes[k] = 'C'（续跟 continue）or 'J'（跳换 jump）
+            outcomes[k] = 'C'（续：列长>1）or 'J'（跳：列长==1）
         """
         signals = []
         outcomes = []
 
-        # 从第 offset+2 列开始（需要 offset+1 列的参照）
         start_col = offset + 1
         for i in range(start_col, len(columns)):
             ref_col_idx = i - offset - 1
@@ -211,95 +208,85 @@ class DerivedRoadMetaRuleDetector:
             ref_len = len(columns[ref_col_idx])
             cur_len = len(columns[i])
 
-            # 信号判断
-            if cur_len > ref_len:
-                sig = 'R'   # 红：当前列比参照列更长（规律延续）
-            elif cur_len < ref_len:
-                sig = 'B'   # 蓝：当前列比参照列更短（规律中断）
+            # 信号判断：当前列与参照列高度比较
+            if cur_len >= ref_len:
+                sig = 'R'   # 红：当前列不比参照列短（规律延续）
             else:
-                # 相等：也视为红（大多数实现中相等=红）
-                sig = 'R'
+                sig = 'B'   # 蓝：当前列比参照列短（规律中断）
 
-            # 结果判断：这个新列的起点是续还是跳
-            # 新列的第一个结果 = columns[i][0]
-            # 前一列的最后结果 = columns[i-1][-1]
-            if columns[i][0] != columns[i - 1][-1]:
-                outcome = 'J'  # 跳换（开了新列本来就跳了）
+            # Audit#C修正：结果改为续/跳
+            # 看该信号对应列的下一列（i+1）是续还是跳
+            if i + 1 < len(columns):
+                outcome = 'C' if len(columns[i + 1]) > 1 else 'J'
             else:
-                # 这其实不可能，因为开新列必然换方向
-                outcome = 'C'
-
-            # 更有意义的结果定义：
-            # 信号对应"下一局的续跳"而非"是否开新列"
-            # 重新定义：
-            # outcome = 新列的第一个结果（B/P）
-            # 然后在统计阶段计算 B的出现率 →  预测B的概率
+                # 最后一列（还在进行中），跳过不记
+                continue
 
             signals.append(sig)
-            outcomes.append(columns[i][0])   # 存实际结果（B/P）而非C/J
+            outcomes.append(outcome)
 
         return signals, outcomes
 
     def _compute_conditional_stats(self, signals: list, outcomes: list) -> dict:
         """
-        统计给定信号序列下的条件概率。
+        Audit#C重写：统计给定信号序列下"续/跳"的条件概率。
 
         Returns:
             {
-                'red_b': 红信号后出现B的次数,
-                'red_p': 红信号后出现P的次数,
-                'blue_b': 蓝信号后出现B的次数,
-                'blue_p': 蓝信号后出现P的次数,
+                'red_c': 红信号后续(Continue)的次数,
+                'red_j': 红信号后跳(Jump)的次数,
+                'blue_c': 蓝信号后续的次数,
+                'blue_j': 蓝信号后跳的次数,
                 'red_total': 红信号总次数,
                 'blue_total': 蓝信号总次数,
                 'total': 总信号数,
-                'red_dominant': 'B' | 'P' | 'tie',  ← 红信号下更可能出现B还是P
-                'blue_dominant': 'B' | 'P' | 'tie',
-                'red_confidence': %,    ← 红信号下主导方的占比
+                'red_dominant': 'C'|'J'|'tie', ← 红信号后更可能续还是跳
+                'blue_dominant': 'C'|'J'|'tie',
+                'red_confidence': %,
                 'blue_confidence': %,
             }
         """
-        red_b = red_p = blue_b = blue_p = 0
+        red_c = red_j = blue_c = blue_j = 0
 
         for sig, out in zip(signals, outcomes):
             if sig == 'R':
-                if out == 'B':
-                    red_b += 1
+                if out == 'C':
+                    red_c += 1
                 else:
-                    red_p += 1
+                    red_j += 1
             else:  # sig == 'B'
-                if out == 'B':
-                    blue_b += 1
+                if out == 'C':
+                    blue_c += 1
                 else:
-                    blue_p += 1
+                    blue_j += 1
 
-        red_total = red_b + red_p
-        blue_total = blue_b + blue_p
+        red_total = red_c + red_j
+        blue_total = blue_c + blue_j
         total = red_total + blue_total
 
         red_dominant = 'tie'
         red_conf = 50.0
         if red_total > 0:
-            if red_b > red_p:
-                red_dominant = 'B'
-                red_conf = red_b / red_total * 100
-            elif red_p > red_b:
-                red_dominant = 'P'
-                red_conf = red_p / red_total * 100
+            if red_c > red_j:
+                red_dominant = 'C'
+                red_conf = red_c / red_total * 100
+            elif red_j > red_c:
+                red_dominant = 'J'
+                red_conf = red_j / red_total * 100
 
         blue_dominant = 'tie'
         blue_conf = 50.0
         if blue_total > 0:
-            if blue_b > blue_p:
-                blue_dominant = 'B'
-                blue_conf = blue_b / blue_total * 100
-            elif blue_p > blue_b:
-                blue_dominant = 'P'
-                blue_conf = blue_p / blue_total * 100
+            if blue_c > blue_j:
+                blue_dominant = 'C'
+                blue_conf = blue_c / blue_total * 100
+            elif blue_j > blue_c:
+                blue_dominant = 'J'
+                blue_conf = blue_j / blue_total * 100
 
         return {
-            'red_b': red_b, 'red_p': red_p,
-            'blue_b': blue_b, 'blue_p': blue_p,
+            'red_c': red_c, 'red_j': red_j,
+            'blue_c': blue_c, 'blue_j': blue_j,
             'red_total': red_total, 'blue_total': blue_total,
             'total': total,
             'red_dominant': red_dominant,
@@ -310,15 +297,13 @@ class DerivedRoadMetaRuleDetector:
 
     def _determine_dominant_rule(self, rules: dict):
         """
-        综合三条路的统计，确定主导元规律。
-
-        V2 优化：增加三路共振信号检测。
+        Audit#C重写：综合三条路的续/跳统计，确定主导元规律。
 
         元规律类型：
-          'red_B'  = 红信号后大概率出B（逢红开庄）
-          'red_P'  = 红信号后大概率出P（逢红开闲）
-          'blue_B' = 蓝信号后大概率出B（逢蓝开庄）
-          'blue_P' = 蓝信号后大概率出P（逢蓝开闲）
+          'red_C' = 红信号后大概率续（逢红续跟，有路）
+          'red_J' = 红信号后大概率跳（逢红换方向）
+          'blue_C' = 蓝信号后大概率续
+          'blue_J' = 蓝信号后大概率跳（逢蓝跳换）
           'unstable' = 三路结论不一致
 
         Returns:
@@ -326,31 +311,31 @@ class DerivedRoadMetaRuleDetector:
         """
         road_names = ['big_eye', 'small_road', 'cockroach']
 
-        votes_red_b = votes_red_p = 0
-        votes_blue_b = votes_blue_p = 0
+        votes_red_c = votes_red_j = 0
+        votes_blue_c = votes_blue_j = 0
         total_conf_red = total_conf_blue = 0
 
         for road in road_names:
             r = rules[road]
             if r['red_total'] >= 3:
                 total_conf_red += r['red_confidence']
-                if r['red_dominant'] == 'B':
-                    votes_red_b += 1
-                elif r['red_dominant'] == 'P':
-                    votes_red_p += 1
+                if r['red_dominant'] == 'C':
+                    votes_red_c += 1
+                elif r['red_dominant'] == 'J':
+                    votes_red_j += 1
 
             if r['blue_total'] >= 3:
                 total_conf_blue += r['blue_confidence']
-                if r['blue_dominant'] == 'B':
-                    votes_blue_b += 1
-                elif r['blue_dominant'] == 'P':
-                    votes_blue_p += 1
+                if r['blue_dominant'] == 'C':
+                    votes_blue_c += 1
+                elif r['blue_dominant'] == 'J':
+                    votes_blue_j += 1
 
         results = [
-            ('red_B', votes_red_b, total_conf_red / 3),
-            ('red_P', votes_red_p, total_conf_red / 3),
-            ('blue_B', votes_blue_b, total_conf_blue / 3),
-            ('blue_P', votes_blue_p, total_conf_blue / 3),
+            ('red_C', votes_red_c, total_conf_red / 3),
+            ('red_J', votes_red_j, total_conf_red / 3),
+            ('blue_C', votes_blue_c, total_conf_blue / 3),
+            ('blue_J', votes_blue_j, total_conf_blue / 3),
         ]
         results.sort(key=lambda x: (x[1], x[2]), reverse=True)
 
@@ -362,10 +347,10 @@ class DerivedRoadMetaRuleDetector:
         consistency = best_votes / 3
 
         rule_desc = {
-            'red_B': '逢红出庄（红信号强势跟庄）',
-            'red_P': '逢红出闲（红信号强势跟闲）',
-            'blue_B': '逢蓝出庄（蓝信号强势跟庄）',
-            'blue_P': '逢蓝出闲（蓝信号强势跟闲）',
+            'red_C': '逢红续跟（红信号后趋势延续）',
+            'red_J': '逢红跳换（红信号后趋势断裂）',
+            'blue_C': '逢蓝续跟（蓝信号后趋势延续）',
+            'blue_J': '逢蓝跳换（蓝信号后趋势断裂）',
         }.get(best_rule, best_rule)
 
         roads_agree = f'{best_votes}/3条派生路'
@@ -437,19 +422,19 @@ class DerivedRoadMetaRuleDetector:
     def _make_prediction(self, columns: list, dominant_rule: str,
                          rules: dict, rule_confidence: float) -> dict:
         """
-        基于最新派生路信号和主导元规律，预测下一局结果。
+        Audit#C重写：基于最新派生路信号和续/跳元规律，预测下一局结果。
 
         策略：
-          1. 计算当前最新一列结束后，各条派生路的下一个信号（R/B）
-          2. 用主导规律 + 该信号 → 预测 B 或 P
-          3. 置信度 = rule_confidence × 衰减（避免虚高）
+          1. 计算最新信号（R/B）
+          2. 用主导规律(red_C/red_J/blue_C/blue_J) + 信号 → 预测续跟还是跳换
+          3. 续跟 = 押当前列方向（最后一列的side），跳换 = 押反方向
         """
         if dominant_rule == 'unstable' or not columns:
             return {'B': 50.0, 'P': 50.0, 'T': 0.0,
                     'confidence': 0, 'method': 'derived_road',
                     'reason': '元规律不稳定，不输出预测'}
 
-        # 最新信号：看最后一列与倒数第2列的高度关系（简化：用大眼仔逻辑）
+        # 最新信号
         last_len = len(columns[-1]) if len(columns) >= 1 else 0
         ref_len = len(columns[-3]) if len(columns) >= 3 else 0
 
@@ -458,28 +443,39 @@ class DerivedRoadMetaRuleDetector:
         else:
             latest_signal = 'B'
 
+        # 当前列方向（最后一列的side）
+        current_side = columns[-1][0]  # 'B' or 'P'
+
         # 基于主导规律查表
-        # dominant_rule = 'red_B' | 'red_P' | 'blue_B' | 'blue_P'
-        rule_signal, rule_side = dominant_rule.split('_')  # e.g., 'red', 'B'
+        # dominant_rule = 'red_C' | 'red_J' | 'blue_C' | 'blue_J'
+        rule_signal, rule_action = dominant_rule.split('_')  # e.g., 'red', 'C'
 
         if rule_signal.upper() == latest_signal:
-            # 信号匹配主导规律 → 预测相应方向
-            predict_side = rule_side
+            # 信号匹配主导规律方向
+            if rule_action == 'C':
+                # 续跟 → 押当前列方向
+                predict_side = current_side
+            else:
+                # 跳换 → 押反方向
+                predict_side = 'P' if current_side == 'B' else 'B'
             confidence_multiplier = 1.0
         else:
-            # 信号不匹配 → 反向（但置信度打折）
-            predict_side = 'P' if rule_side == 'B' else 'B'
+            # 信号不匹配 → 反向推断（置信度打折）
+            if rule_action == 'C':
+                predict_side = 'P' if current_side == 'B' else 'B'
+            else:
+                predict_side = current_side
             confidence_multiplier = 0.6
 
-        # 计算最终置信度（封顶 MAX_CONFIDENCE）
         confidence = min(self.MAX_CONFIDENCE,
                          rule_confidence * confidence_multiplier)
 
         b_prob = 55.0 if predict_side == 'B' else 40.0
         p_prob = 100.0 - b_prob - 5.0
 
-        reason = (f'元规律:{dominant_rule}，'
-                  f'最新信号:{"红" if latest_signal == "R" else "蓝"}，'
+        action_desc = '续跟' if rule_action == 'C' else '跳换'
+        reason = (f'元规律:{action_desc}({dominant_rule})，'
+                  f'信号:{"红" if latest_signal == "R" else "蓝"}，'
                   f'预测{"庄" if predict_side == "B" else "闲"}')
 
         return {

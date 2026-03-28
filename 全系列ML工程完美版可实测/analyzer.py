@@ -156,22 +156,30 @@ class BaccaratAnalyzer:
 
         avg_height = weighted_height_sum / weight_sum if weight_sum > 0 else 0
 
-        # V2：自适应阈值——基于靴内列高度的中位数
+        # Audit#C修复：改用「长龙列占比」而非median×1.5的自适应阈值。
+        # 原逻辑问题：当所有列都是长龙时，median本身就大，1.5倍后阈值过高，
+        # 导致 [5,3,4] 这种明显长龙靴被误判为mixed。
         heights = [len(col) for col in road]
-        sorted_heights = sorted(heights)
-        median_height = sorted_heights[len(sorted_heights) // 2]
+        n_cols = len(heights)
 
-        long_thresh = max(2.5, median_height * 1.5)
-        alt_thresh = min(1.8, median_height * 0.8) if median_height > 1 else 1.5
+        # 长龙列：高度>=3 的列
+        long_cols = sum(1 for h in heights if h >= 3)
+        long_ratio = long_cols / n_cols
 
-        if avg_height >= long_thresh:
+        # 短列：高度==1 的列（单跳特征）
+        short_cols = sum(1 for h in heights if h == 1)
+        short_ratio = short_cols / n_cols
+
+        if long_ratio >= 0.5:
+            # 超过一半的列是长龙 → 长龙靴
             banker_long = sum(1 for col in road if len(col) >= 3 and col[0] == 'B')
             player_long = sum(1 for col in road if len(col) >= 3 and col[0] == 'P')
             if banker_long >= player_long:
                 return 'long_banker'
             else:
                 return 'long_player'
-        elif avg_height <= alt_thresh:
+        elif short_ratio >= 0.7:
+            # 70%以上的列高度为1 → 单跳靴
             return 'alternating'
         else:
             return 'mixed'

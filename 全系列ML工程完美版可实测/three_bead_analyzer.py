@@ -209,9 +209,15 @@ class ThreeBeadAnalyzer:
         b_prob = b_prob / bp_sum * 100
         p_prob = p_prob / bp_sum * 100
 
-        # 置信度基于样本量和偏离度
+        # Audit#C修复：置信度以样本量为主要因子，1样本不应超30%
+        # 原公式 30+total*5+imbalance*40 在 total=1,imbalance=1 时给出65，过高
         imbalance = abs(b_rate - p_rate)
-        confidence = min(65, 30 + total * 5 + imbalance * 40)
+        if total <= 1:
+            confidence = min(30, 15 + imbalance * 15)
+        elif total <= 3:
+            confidence = min(45, 20 + total * 6 + imbalance * 15)
+        else:
+            confidence = min(65, 25 + total * 5 + imbalance * 20)
 
         predict_side = 'B' if b_rate > p_rate else 'P'
         reason = f'{reason_prefix}，样本{total}次，{predict_side}占{max(b_rate,p_rate)*100:.0f}%'
