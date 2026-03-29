@@ -4,11 +4,6 @@
 """
 
 from analyzer import BaccaratAnalyzer
-from predictor import (
-    LSTMPredictor, 
-    RandomForestPredictor,
-    FrequencyPredictor
-)
 from predictor_with_features import (
     LSTMPredictorV2,
     RandomForestPredictorV2
@@ -54,12 +49,8 @@ class EnsemblePredictor:
             current_shoe_data=self.current_shoe_data
         )
         
-        # 初始化独立预测器（原始版本）
-        self.lstm = LSTMPredictor(self.combined_data)
-        self.rf = RandomForestPredictor(self.combined_data)
-        self.freq = FrequencyPredictor(self.combined_data)
-        
         # 初始化特征工程预测器（V2版本）
+        # 去同质化：删除LSTM V1/RF V1/Frequency（被V2严格取代/信息冗余）
         self.lstm_v2 = None
         self.rf_v2 = None
         if self.shoes and len(self.shoes) > 0:
@@ -182,77 +173,26 @@ class EnsemblePredictor:
                 })
                 self.last_model_predictions[model_name] = self._get_prediction_choice(hist_pred)
 
-        # 2. 趋势预测
-        if self._model_enabled('Trend'):
+        # 2. 动量模型（合并原Trend+Streak，去同质化）
+        # 趋势和连龙本质都是分析B/P势头，合并为一个投票避免同质重复
+        if self._model_enabled('Momentum') or self._model_enabled('Trend') or self._model_enabled('Streak'):
             trend_pred = self.analyzer.predict_by_trend()
-            if trend_pred['confidence'] > 30:
-                model_name = 'Trend'
-                base_weight = 0.5
-                adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, shoe_weight_adj)
-                adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
-                predictions.append({
-                    'name': model_name, 'weight': adjusted_weight,
-                    'base_weight': base_weight, 'prediction': trend_pred
-                })
-                self.last_model_predictions[model_name] = self._get_prediction_choice(trend_pred)
-
-        # 3. 连胜预测
-        if self._model_enabled('Streak'):
             streak_pred = self.analyzer.predict_by_streak()
-            if streak_pred['confidence'] > 30:
-                model_name = 'Streak'
-                base_weight = 0.6
+            momentum_pred = self._merge_momentum(trend_pred, streak_pred)
+            if momentum_pred['confidence'] > 30:
+                model_name = 'Momentum'
+                base_weight = 0.7
                 adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, shoe_weight_adj)
                 adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
                 predictions.append({
                     'name': model_name, 'weight': adjusted_weight,
-                    'base_weight': base_weight, 'prediction': streak_pred
+                    'base_weight': base_weight, 'prediction': momentum_pred
                 })
-                self.last_model_predictions[model_name] = self._get_prediction_choice(streak_pred)
+                self.last_model_predictions[model_name] = self._get_prediction_choice(momentum_pred)
 
-        # 4. 频率预测
-        if self._model_enabled('Frequency'):
-            freq_pred = self.freq.predict(self.current_shoe_data, window=len(self.current_shoe_data))
-            if freq_pred['confidence'] > 0:
-                model_name = 'Frequency'
-                base_weight = 0.5
-                adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, shoe_weight_adj)
-                adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
-                predictions.append({
-                    'name': model_name, 'weight': adjusted_weight,
-                    'base_weight': base_weight, 'prediction': freq_pred
-                })
-                self.last_model_predictions[model_name] = self._get_prediction_choice(freq_pred)
+        # 去同质化：删除 Frequency(0阶Markov冗余)、LSTM V1(被V2取代)、RF V1(被V2取代)
 
-        # 5. LSTM预测
-        if self._model_enabled('LSTM') and self.lstm.can_train():
-            try:
-                lstm_pred = self.lstm.predict(self.current_shoe_data)
-                if lstm_pred['confidence'] > 0:
-                    model_name = 'LSTM'
-                    base_weight = 0.8
-                    adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, shoe_weight_adj)
-                    adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
-                    predictions.append({'name': model_name, 'weight': adjusted_weight, 'base_weight': base_weight, 'prediction': lstm_pred})
-                    self.last_model_predictions[model_name] = self._get_prediction_choice(lstm_pred)
-            except BaseException:
-                pass
-
-        # 6. 随机森林预测
-        if self._model_enabled('RandomForest') and self.rf.can_train():
-            try:
-                rf_pred = self.rf.predict(self.current_shoe_data)
-                if rf_pred['confidence'] > 0:
-                    model_name = 'RandomForest'
-                    base_weight = 0.5
-                    adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, shoe_weight_adj)
-                    adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
-                    predictions.append({'name': model_name, 'weight': adjusted_weight, 'base_weight': base_weight, 'prediction': rf_pred})
-                    self.last_model_predictions[model_name] = self._get_prediction_choice(rf_pred)
-            except BaseException:
-                pass
-
-        # 7. LSTM V2预测
+        # 3. LSTM V2预测（特征工程版LSTM）
         if self._model_enabled('LSTM_V2') and self.lstm_v2 and self.lstm_v2.can_train():
             try:
                 lstm_v2_pred = self.lstm_v2.predict(self.current_shoe_data)
@@ -266,7 +206,7 @@ class EnsemblePredictor:
             except BaseException:
                 pass
 
-        # 8. 随机森林V2预测
+        # 4. 随机森林V2预测（特征工程版RF）
         if self._model_enabled('RF_V2') and self.rf_v2 and self.rf_v2.can_train():
             try:
                 rf_v2_pred = self.rf_v2.predict(self.current_shoe_data)
@@ -280,13 +220,12 @@ class EnsemblePredictor:
             except BaseException:
                 pass
 
-        # 9. 相似靴牌预测器
-        # Fix(Bug#1): SimilarShoe 权重从 4.0 降至 1.2，与 Historical/Markov 持平，避免一家独大
+        # 5. 相似靴牌预测器（CBR案例匹配）
         if self._model_enabled('SimilarShoe') and self.similar_shoe and self.similar_shoe.can_predict():
             similar_pred = self.similar_shoe.predict(self.current_shoe_data, top_n=5)
             if similar_pred['confidence'] > 0:
                 model_name = 'SimilarShoe'
-                base_weight = 1.2  # Fix(Bug#1): 从 4.0 降至 1.2
+                base_weight = 1.2
                 adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, shoe_weight_adj)
                 adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
                 
@@ -299,8 +238,7 @@ class EnsemblePredictor:
                 
                 self.last_model_predictions[model_name] = self._get_prediction_choice(similar_pred)
 
-        # 10. Audit#B新增：双跳（双对 BBPP）模式预测
-        # 原 predict_by_double_alternation 方法已存在但未集成到 predict_next
+        # 6. 双跳模式预测
         if self._model_enabled('DoubleAlt'):
             double_pred = self.analyzer.predict_by_double_alternation(regime_result)
             if double_pred['confidence'] > 30:
@@ -314,8 +252,7 @@ class EnsemblePredictor:
                 })
                 self.last_model_predictions[model_name] = self._get_prediction_choice(double_pred)
 
-        # 11. 派生路元规律预测（DerivedRoadMetaRule）
-        # 靠靠内实时学习”逢红就续/逢蓝就跳”等元规律
+        # 7. 派生路元规律预测
         if self._model_enabled('DerivedRoad'):
             derived_result = self.derived_road.analyze(self.current_shoe_data)
             if derived_result.get('can_predict', False):
@@ -323,6 +260,7 @@ class EnsemblePredictor:
                 base_weight = self.derived_road.get_prediction_weight(derived_result, regime_result)
                 if base_weight > 0.1:
                     adjusted_weight = self._adjust_model_weight(model_name, base_weight, weight_adjustment, {})
+                    adjusted_weight = self._apply_regime_weight(model_name, adjusted_weight, regime_weight_adj)
                     derived_pred = derived_result['prediction']
                     predictions.append({
                         'name': model_name,
@@ -332,7 +270,7 @@ class EnsemblePredictor:
                     })
                     self.last_model_predictions[model_name] = self._get_prediction_choice(derived_pred)
 
-        # 12. V2 新增：三珠路分析引擎 (ThreeBead)
+        # 8. 三珠路分析引擎
         if self._model_enabled('ThreeBead'):
             three_bead_result = self.three_bead.analyze(self.current_shoe_data)
             if three_bead_result.get('can_predict', False):
@@ -431,49 +369,41 @@ class EnsemblePredictor:
         Returns:
             (b, p, t) 归一化后的三元组，总和为100
         """
-        # 1. 将 T 概率限制在合理范围（不允许和局概率超过30%或低于0%）
-        t_prob = max(0.0, min(30.0, t_prob))
-        
-        # 2. B 和 P 的总和必须等于 100 - t_prob
+        # BUG-5重写：原逻辑先夹紧[10,78]再归一化，归一化会破坏夹紧约束
+        # 新逻辑：先按比例缩放到100，再做soft clamp（保持总和100不变）
+
+        # Step 1: T概率限制
+        t_prob = max(0.0, min(20.0, t_prob))
+
+        # Step 2: B/P按比例分配剩余空间
         bp_total = 100.0 - t_prob
-        
         raw_bp = b_prob + p_prob
         if raw_bp <= 0:
-            # 极端情况：按理论概率分配
             b_prob = 45.86 / (45.86 + 44.62) * bp_total
             p_prob = bp_total - b_prob
         else:
-            # 按原始比例缩放
             scale = bp_total / raw_bp
-            b_prob = b_prob * scale
-            p_prob = p_prob * scale
-        
-        # 3. 确保 B/P 不出现极端值（最高不超过80%，最低不低于10%）
-        # 使用 softmax-like 方法而非硬夹紧
-        MAX_SINGLE = 78.0
-        MIN_SINGLE = 10.0
-        
-        if b_prob > MAX_SINGLE:
-            excess = b_prob - MAX_SINGLE
-            b_prob = MAX_SINGLE
-            p_prob = min(p_prob + excess, bp_total - MIN_SINGLE)
-        elif p_prob > MAX_SINGLE:
-            excess = p_prob - MAX_SINGLE
-            p_prob = MAX_SINGLE
-            b_prob = min(b_prob + excess, bp_total - MIN_SINGLE)
-        
-        b_prob = max(MIN_SINGLE, b_prob)
-        p_prob = max(MIN_SINGLE, p_prob)
-        
-        # 4. 最终精确归一化（消除浮点误差）
-        total = b_prob + p_prob + t_prob
-        if total > 0:
-            factor = 100.0 / total
-            b_prob *= factor
-            p_prob *= factor
-            t_prob *= factor
-        
-        return b_prob, p_prob, t_prob
+            b_prob *= scale
+            p_prob *= scale
+
+        # Step 3: Soft clamp — 保持 B+P=bp_total 不变
+        MAX_BP = 75.0
+        MIN_BP = bp_total - MAX_BP
+
+        if b_prob > MAX_BP:
+            b_prob = MAX_BP
+            p_prob = bp_total - b_prob
+        elif p_prob > MAX_BP:
+            p_prob = MAX_BP
+            b_prob = bp_total - p_prob
+        elif b_prob < MIN_BP:
+            b_prob = MIN_BP
+            p_prob = bp_total - b_prob
+        elif p_prob < MIN_BP:
+            p_prob = MIN_BP
+            b_prob = bp_total - p_prob
+
+        return round(b_prob, 2), round(p_prob, 2), round(t_prob, 2)
     
     def _ensemble_predictions(self, predictions):
         """
@@ -567,13 +497,15 @@ class EnsemblePredictor:
             prob_winner = 'T'
             prob_diff = final_t - max(final_b, final_p)
         
-        # Fix(Bug#11): 简化决策：概率差 > 1% 就选概率方，否则投票方
+        # BUG-6修复：强分歧时降低置信度并标记
         vote_winner = max(votes, key=votes.get)
         if prob_diff >= 1.0:
             recommendation = prob_winner
         else:
             recommendation = vote_winner
-        
+            # 模型强分歧：概率差<1%说明方向不明
+            avg_confidence *= 0.6  # 置信度打6折
+
         # 评估预测强度
         if prob_diff > 15 and avg_confidence > 60:
             strength = 'strong'
@@ -828,6 +760,66 @@ class EnsemblePredictor:
         
         return adjustment, reason
     
+    def _merge_momentum(self, trend_pred, streak_pred):
+        """
+        合并Trend和Streak为单一动量模型预测。
+
+        去同质化：Trend(B/P比率不平衡)和Streak(连龙续跟)本质上都分析B/P势头，
+        合并为一个投票避免同质模型重复计票。
+
+        合并策略：
+        - 两者方向一致：取更高置信度，概率取加权平均
+        - 两者方向不一致：取置信度更高者，但置信度打折
+        - 只有一方有效：直接用那方的结果
+        """
+        t_valid = trend_pred.get('confidence', 0) > 30
+        s_valid = streak_pred.get('confidence', 0) > 30
+
+        if not t_valid and not s_valid:
+            return {'B': 50.0, 'P': 50.0, 'T': 0.0, 'confidence': 0,
+                    'method': 'momentum', 'reason': '趋势和连龙均无明确信号'}
+        if not s_valid:
+            trend_pred['method'] = 'momentum'
+            trend_pred['reason'] = '动量(趋势): ' + trend_pred.get('reason', '')
+            return trend_pred
+        if not t_valid:
+            streak_pred['method'] = 'momentum'
+            streak_pred['reason'] = '动量(连龙): ' + streak_pred.get('reason', '')
+            return streak_pred
+
+        # 两者都有效
+        t_choice = 'B' if trend_pred['B'] > trend_pred['P'] else 'P'
+        s_choice = 'B' if streak_pred['B'] > streak_pred['P'] else 'P'
+
+        t_conf = trend_pred['confidence']
+        s_conf = streak_pred['confidence']
+
+        if t_choice == s_choice:
+            # 方向一致：加权平均概率，置信度取较高者+一致性加成
+            total_conf = t_conf + s_conf
+            w_t = t_conf / total_conf
+            w_s = s_conf / total_conf
+            merged_b = trend_pred['B'] * w_t + streak_pred['B'] * w_s
+            merged_p = trend_pred['P'] * w_t + streak_pred['P'] * w_s
+            merged_conf = min(75, max(t_conf, s_conf) * 1.1)
+            reason = f'动量一致({t_choice}): 趋势+连龙共振'
+        else:
+            # 方向不一致：取置信度更高者，但打折
+            if t_conf >= s_conf:
+                merged_b, merged_p = trend_pred['B'], trend_pred['P']
+                merged_conf = t_conf * 0.7
+                reason = f'动量分歧: 趋势({t_choice})优先，连龙({s_choice})反向'
+            else:
+                merged_b, merged_p = streak_pred['B'], streak_pred['P']
+                merged_conf = s_conf * 0.7
+                reason = f'动量分歧: 连龙({s_choice})优先，趋势({t_choice})反向'
+
+        return {
+            'B': merged_b, 'P': merged_p, 'T': 0.0,
+            'confidence': round(merged_conf, 1),
+            'method': 'momentum', 'reason': reason
+        }
+
     def _adjust_model_weight(self, model_name, base_weight, adjustment_dict, shoe_adjustment_dict=None):
         """
         调整单个模型的权重（基于历史准确率 + 靴牌类型调整）
@@ -849,7 +841,9 @@ class EnsemblePredictor:
         if shoe_adjustment_dict and model_name in shoe_adjustment_dict:
             weight *= shoe_adjustment_dict[model_name]
 
-        return max(0.01, weight)
+        # BUG-4修复：限制权重范围，防止级联乘法导致极端值
+        # 无上限时权重可达 base×2.0×1.3×1.8=5.6，与最低0.03差187倍
+        return max(0.05, min(weight, base_weight * 3.0))
 
     def _apply_regime_weight(self, model_name, current_weight, regime_weight_adj):
         """
@@ -865,7 +859,8 @@ class EnsemblePredictor:
         """
         if regime_weight_adj and model_name in regime_weight_adj:
             current_weight *= regime_weight_adj[model_name]
-        return max(0.01, current_weight)
+        # BUG-4修复：regime调整后也要限制范围
+        return max(0.05, min(current_weight, 3.0))
     
     def _get_prediction_choice(self, prediction):
         """

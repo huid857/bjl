@@ -392,22 +392,21 @@ class AdvancedShoeAnalyzer:
             'model_adjustments': {}
         }
 
+        # 去同质化后的模型名：Momentum(合并Trend+Streak), 无Frequency
         if primary == 'long_dragon':
             adjustments['model_adjustments'] = {
-                'Streak': 1.3, 'Trend': 0.8, 'DataDriven': 1.2
+                'Momentum': 1.3, 'SimilarShoe': 1.2
             }
         elif primary == 'alternating':
             adjustments['model_adjustments'] = {
-                'Streak': 0.6, 'Trend': 1.3, 'Frequency': 1.2
+                'Momentum': 0.7, 'DerivedRoad': 1.2, 'ThreeBead': 1.2
             }
         elif primary == 'double_alternating':
             adjustments['model_adjustments'] = {
-                'Streak': 0.5, 'IntraShoeNgram': 1.4, 'Frequency': 1.1
+                'Momentum': 0.6, 'DoubleAlt': 1.4, 'ThreeBead': 1.1
             }
-        elif primary == 'banker_dominant':
-            adjustments['model_adjustments'] = {'Frequency': 1.1}
-        elif primary == 'player_dominant':
-            adjustments['model_adjustments'] = {'Frequency': 1.1}
+        elif primary in ('banker_dominant', 'player_dominant'):
+            adjustments['model_adjustments'] = {'Momentum': 1.1}
 
         return adjustments
 

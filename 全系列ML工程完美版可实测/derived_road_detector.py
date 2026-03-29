@@ -199,9 +199,11 @@ class DerivedRoadMetaRuleDetector:
         signals = []
         outcomes = []
 
-        start_col = offset + 1
+        # BUG-2修复：原 ref_col_idx = i - offset - 1 多减了1
+        # 标准规则：大眼仔对比前1列，小路对比前2列，曱甴路对比前3列
+        start_col = offset
         for i in range(start_col, len(columns)):
-            ref_col_idx = i - offset - 1
+            ref_col_idx = i - offset
             if ref_col_idx < 0:
                 continue
 
@@ -434,23 +436,26 @@ class DerivedRoadMetaRuleDetector:
                     'confidence': 0, 'method': 'derived_road',
                     'reason': '元规律不稳定，不输出预测'}
 
-        # 最新信号
-        last_len = len(columns[-1]) if len(columns) >= 1 else 0
-        ref_len = len(columns[-3]) if len(columns) >= 3 else 0
-
-        if last_len >= ref_len:
-            latest_signal = 'R'
+        # BUG-3修复：最新信号应根据主导规律来源的路类型动态选择偏移
+        # 找到最新信号：用最常见的大眼仔偏移(1列)，若列不足则降级
+        if len(columns) >= 2:
+            ref_offset = 1  # 大眼仔：对比前1列
+            last_len = len(columns[-1])
+            ref_len = len(columns[-1 - ref_offset]) if len(columns) > ref_offset else last_len
+            latest_signal = 'R' if last_len >= ref_len else 'B'
         else:
-            latest_signal = 'B'
+            latest_signal = 'R'  # 数据不足默认红
 
         # 当前列方向（最后一列的side）
         current_side = columns[-1][0]  # 'B' or 'P'
 
-        # 基于主导规律查表
-        # dominant_rule = 'red_C' | 'red_J' | 'blue_C' | 'blue_J'
+        # BUG-1修复：rule_signal='red'/'blue', latest_signal='R'/'B'
+        # 原代码 rule_signal.upper()='RED' != 'R'，永远走不匹配分支
         rule_signal, rule_action = dominant_rule.split('_')  # e.g., 'red', 'C'
+        signal_match = (rule_signal == 'red' and latest_signal == 'R') or \
+                       (rule_signal == 'blue' and latest_signal == 'B')
 
-        if rule_signal.upper() == latest_signal:
+        if signal_match:
             # 信号匹配主导规律方向
             if rule_action == 'C':
                 # 续跟 → 押当前列方向

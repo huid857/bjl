@@ -149,49 +149,57 @@ class ShoeRegimeDetector:
 
         adj = {}
 
+        # 去同质化后的8个模型：Historical, Momentum, LSTM_V2, RF_V2,
+        # SimilarShoe, DoubleAlt, DerivedRoad, ThreeBead
+
         if dominant == 'long_streak':
             s = max(strength, 0.30)
             adj = {
-                'Streak':         lerp(1.0, 1.6, s),
+                'Momentum':       lerp(1.0, 1.5, s),   # 长龙靴→动量模型增权
                 'Historical':     lerp(1.0, 1.1, s),
                 'SimilarShoe':    lerp(1.0, 1.2, s),
-                'IntraShoeNgram': lerp(1.0, 1.4, s),
-                'Trend':          lerp(0.8, 0.6, s),
-                'Frequency':      lerp(0.9, 0.8, s),
+                'LSTM_V2':        lerp(1.0, 1.1, s),
+                'RF_V2':          lerp(1.0, 1.1, s),
+                'DoubleAlt':      lerp(0.8, 0.5, s),   # 长龙靴→双跳降权
+                'DerivedRoad':    lerp(1.0, 1.2, s),
+                'ThreeBead':      lerp(1.0, 1.0, s),
             }
 
         elif dominant == 'single_alt':
             s = max(strength, 0.30)
             adj = {
-                'Streak':         lerp(0.7, 0.3, s),
+                'Momentum':       lerp(0.8, 0.5, s),   # 单跳靴→动量模型降权
                 'Historical':     lerp(0.9, 0.8, s),
                 'SimilarShoe':    lerp(1.0, 1.0, s),
-                'IntraShoeNgram': lerp(1.2, 1.6, s),
-                'Trend':          lerp(1.0, 0.9, s),
-                'Frequency':      lerp(1.0, 1.1, s),
+                'LSTM_V2':        lerp(1.0, 1.2, s),
+                'RF_V2':          lerp(1.0, 1.1, s),
+                'DoubleAlt':      lerp(0.7, 0.4, s),   # 单跳≠双跳
+                'DerivedRoad':    lerp(1.0, 1.3, s),
+                'ThreeBead':      lerp(1.0, 1.2, s),
             }
 
         elif dominant == 'double_alt':
             s = max(strength, 0.30)
             adj = {
-                'Streak':         lerp(0.8, 0.5, s),
+                'Momentum':       lerp(0.8, 0.6, s),
                 'Historical':     lerp(0.9, 0.8, s),
                 'SimilarShoe':    lerp(1.0, 0.9, s),
-                'IntraShoeNgram': lerp(1.2, 1.6, s),
-                'DoubleAlt':      lerp(1.2, 1.8, s),
-                'Trend':          lerp(0.9, 0.8, s),
-                'Frequency':      lerp(1.0, 1.1, s),
+                'LSTM_V2':        lerp(1.0, 1.0, s),
+                'RF_V2':          lerp(1.0, 1.0, s),
+                'DoubleAlt':      lerp(1.2, 1.8, s),   # 双跳靴→双跳专项增权
+                'DerivedRoad':    lerp(1.0, 1.1, s),
+                'ThreeBead':      lerp(1.0, 1.2, s),
             }
 
         else:
             # chaos / switching：所有模型均降权
             chaos_factor = 0.7 if not switch else 0.6
             adj = {
-                'Streak': chaos_factor, 'Historical': chaos_factor,
-                'SimilarShoe': chaos_factor, 'IntraShoeNgram': chaos_factor,
-                'Trend': chaos_factor, 'Frequency': chaos_factor,
-                'LSTM': chaos_factor, 'RandomForest': chaos_factor,
+                'Momentum': chaos_factor, 'Historical': chaos_factor,
+                'SimilarShoe': chaos_factor,
                 'LSTM_V2': chaos_factor, 'RF_V2': chaos_factor,
+                'DoubleAlt': chaos_factor, 'DerivedRoad': chaos_factor,
+                'ThreeBead': chaos_factor,
             }
 
         # V2：切换中额外惩罚
